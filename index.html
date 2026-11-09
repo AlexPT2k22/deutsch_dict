@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Einmal">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon.png">
+<title>Einmal preview</title>
+<style>
+:root { --bg: #fdfcf9; --fg: #1d1d1f; --muted: #6e6e73; --der: #1f5fbf; --die: #c4302b; --das: #23864a; --grey: #8a8a8e; --bar: #ececf0; --button: #1d1d1f; --button-fg: #fdfcf9; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #141416; --fg: #ececf0; --muted: #a1a1a6; --der: #6ea8ff; --die: #ff7a73; --das: #5fd18a; --grey: #8e8e93; --bar: #2a2a2e; --button: #ececf0; --button-fg: #141416; }
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font: 19px/1.7 -apple-system, system-ui, sans-serif; margin: 0 auto; max-width: 40em;
+       padding: calc(12px + env(safe-area-inset-top)) 16px calc(120px + env(safe-area-inset-bottom)); }
+.legend, footer, #status { font-size: 15px; color: var(--muted); }
+textarea { width: 100%; min-height: 50vh; font: 17px/1.5 -apple-system, system-ui, sans-serif; padding: 12px; border-radius: 12px;
+           border: 1px solid var(--grey); background: transparent; color: var(--fg); }
+button { min-height: 48px; padding: 0 20px; margin: 12px 8px 0 0; border: 0; border-radius: 12px; font: 600 17px -apple-system, system-ui, sans-serif;
+         background: var(--button); color: var(--button-fg); }
+button.secondary { background: transparent; color: var(--fg); border: 1px solid var(--grey); }
+button:disabled { opacity: 0.4; }
+#reading { white-space: pre-wrap; overflow-wrap: anywhere; }
+.w { cursor: pointer; text-underline-offset: 4px; text-decoration-thickness: 2px; }
+.der { color: var(--der); text-decoration: underline solid var(--der); }
+.die { color: var(--die); text-decoration: underline dashed var(--die); }
+.das { color: var(--das); text-decoration: underline dotted var(--das); }
+.plural { text-decoration: underline double; }
+.grey { color: var(--grey); }
+footer { margin-top: 32px; }
+#bar { position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); background: var(--bar); font-size: 15px; min-height: 3em; }
+</style>
+</head>
+<body>
+<p class="legend"><span class="der">der</span> · <span class="die">die</span> · <span class="das">das</span> · <span class="plural">plural only</span> · <span class="grey">grey = not sure</span></p>
+
+<section id="input-view">
+  <textarea id="text" lang="de" maxlength="10000" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Paste German text here"></textarea>
+  <button id="colour" disabled>Colour it</button>
+</section>
+
+<section id="read-view" hidden>
+  <div id="reading" lang="de"></div>
+  <button id="new" class="secondary">New text</button>
+</section>
+
+<p id="status">Loading dictionary…</p>
+
+<footer>
+  <p id="stats"></p>
+  <button id="diary" class="secondary">I didn't know a word (diary)</button>
+  <p>Dictionary: English Wiktionary via Wiktextract, <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>. Your text stays on this phone.</p>
+</footer>
+
+<div id="bar">Tap a coloured or grey word to see why.</div>
+
+<script>
+const INVISIBLE = new RegExp("[" + String.fromCharCode(0xAD, 0x200B, 0x200C, 0x200D, 0xFEFF) + "]", "g");
+const NO_BREAK_SPACE = new RegExp(String.fromCharCode(0xA0), "g");
+const WORD = /\p{L}+(?:[-'’]\p{L}+)*/gu;
+// Same pattern as SENTENCE_END in preview_rules.py: closing quotes or brackets may follow the punctuation.
+const SENTENCE_END = /[.!?…]["'“”„»«‘’)\]]*\s*$|\n\s*$/;
+const $ = id => document.getElementById(id);
+let data = null, words = null;
+
+// Local storage holds only the current text and dates, never sent anywhere. It can fail in private mode.
+const store = {
+  get(key, fallback) { try { const v = localStorage.getItem(key); return v === null ? fallback : JSON.parse(v); } catch { return fallback; } },
+  set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} },
+};
+const today = () => new Date().toLocaleDateString("sv");
+
+function decide(token, atStart) {
+  const entry = data.forms[token];
+  if (entry) {
+    const start = atStart && entry.length > 3;
+    return [data.styles[start ? entry[3] : entry[0]], data.reasons[start ? entry[4] : entry[1]], entry[2]];
+  }
+  // Mirrors rule 1 of decide_colour in preview_rules.py: a known non-noun word is plain, anything else is unknown.
+  if (atStart || words.has(token.toLowerCase())) return ["plain", "not a noun", ""];
+  return ["grey", "not in dictionary", ""];
+}
+
+function render(text) {
+  text = text.normalize("NFC").replace(INVISIBLE, "").replace(NO_BREAK_SPACE, " ");
+  const out = $("reading");
+  out.replaceChildren();
+  let last = 0, first = true;
+  for (const match of text.matchAll(WORD)) {
+    const token = match[0];
+    out.append(text.slice(last, match.index));
+    const atStart = first || SENTENCE_END.test(text.slice(Math.max(0, match.index - 40), match.index));
+    first = false;
+    if (token[0] !== token[0].toLowerCase()) {
+      const [style, reason, info] = decide(token, atStart);
+      const span = document.createElement("span");
+      span.className = "w " + style;
+      span.textContent = token;
+      span.dataset.info = `${token} — ${reason}` + (info ? ` — ${info}` : "");
+      out.append(span);
+    } else {
+      out.append(token);
+    }
+    last = match.index + token.length;
+  }
+  out.append(text.slice(last));
+}
+
+function show(text) {
+  $("input-view").hidden = !!text;
+  $("read-view").hidden = !text;
+  if (text) render(text);
+  $("bar").textContent = text ? "Tap a coloured or grey word to see why." : "Paste a German text, then Colour it.";
+}
+
+function lastWeek(dates) {
+  const from = new Date(Date.now() - 6 * 864e5).toLocaleDateString("sv");
+  return dates.filter(d => d >= from);
+}
+
+function updateStats() {
+  const days = new Set(lastWeek(store.get("einmal.days", [])));
+  const diary = lastWeek(store.get("einmal.diary", []));
+  $("stats").textContent = `Last 7 days: opened on ${days.size} days · diary ${diary.length} unknown words`;
+}
+
+const days = store.get("einmal.days", []);
+if (!days.includes(today())) store.set("einmal.days", [...days, today()]);
+updateStats();
+
+$("colour").addEventListener("click", () => {
+  const text = $("text").value;
+  if (!text.trim()) return;
+  store.set("einmal.text", text);
+  show(text);
+});
+$("new").addEventListener("click", () => {
+  store.set("einmal.text", "");
+  $("text").value = "";
+  show("");
+});
+$("diary").addEventListener("click", () => {
+  store.set("einmal.diary", [...store.get("einmal.diary", []), today()]);
+  updateStats();
+  $("bar").textContent = "Noted in the diary.";
+});
+document.addEventListener("click", e => {
+  const w = e.target.closest(".w");
+  if (w) $("bar").textContent = w.dataset.info;
+});
+
+Promise.all([
+  fetch("forms.json").then(r => r.json()),
+  fetch("words.txt").then(r => r.text()),
+]).then(([forms, list]) => {
+  data = forms;
+  words = new Set(list.split("\n"));
+  $("status").textContent = `Dictionary build ${data.build}`;
+  $("colour").disabled = false;
+  show(store.get("einmal.text", ""));
+}).catch(() => {
+  $("status").textContent = "Could not load the dictionary. Open the page once with a connection.";
+});
+
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");
+</script>
+</body>
+</html>
